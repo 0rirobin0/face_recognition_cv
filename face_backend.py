@@ -1,59 +1,81 @@
-
 from flask import Flask, request, jsonify
-import base64
-import numpy as np
-import cv2
+from flask_cors import CORS
 import os
-from face_model import train_face_recognizer, create_user, recognize_faces, add_face_image, recognize_face
+import cv2
+import numpy as np
+import base64
+from face_model import train_face_recognizer, recognize_face
 
 app = Flask(__name__)
+CORS(app)
 
-@app.route('/add-face-camera', methods=['POST'])
-def add_face_camera():
-	data = request.get_json()
-	name = data.get('name')
-	f_id = data.get('id', 1)
-	create_user(f_id, name)
-	train_face_recognizer()
-	return jsonify({'success': True})
+FACES_DIR = "faces"
+os.makedirs(FACES_DIR, exist_ok=True)
 
-@app.route('/recognize-camera', methods=['GET'])
-def recognize_camera():
-	name = recognize_faces()
-	return jsonify({'name': name})
 
-@app.route('/recognize', methods=['POST'])
+def save_images(name, images):
+    user_folder = os.path.join(FACES_DIR, name)
+    os.makedirs(user_folder, exist_ok=True)
+    for idx, image_data in enumerate(images, start=1):
+        try:
+            if ',' in image_data:
+                _, encoded = image_data.split(',', 1)
+            else:
+                encoded = image_data
+            img_bytes = base64.b64decode(encoded)
+            nparr = np.frombuffer(img_bytes, np.uint8)
+            img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            if img_np is not None:
+                cv2.imwrite(os.path.join(user_folder, f"{name}_{idx}.jpg"), img_np)
+        except Exception as e:
+            print(f"Error saving frame {idx}: {e}")
+
+
+@app.route("/add-face", methods=["POST"])
+def add_face():
+    data = request.get_json()
+    name = data.get("name")
+    images = data.get("images")
+    if not name or not images:
+        return jsonify({"success": False, "error": "Missing name or images"}), 400
+
+    try:
+        save_images(name, images)
+        train_face_recognizer()  # retrain after adding new images
+        return jsonify({"success": True})
+    except Exception as e:
+        print(f"Error adding face: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route("/recognize", methods=["POST"])
 def recognize():
-	data = request.get_json()
-	image_data = data['image']
-	header, encoded = image_data.split(',', 1)
-	img_bytes = base64.b64decode(encoded)
-	nparr = np.frombuffer(img_bytes, np.uint8)
-	img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-	name = recognize_face(img_np)
-	return jsonify({'name': name})
+    data = request.get_json()
+    image_data = data.get("image")
+    if not image_data:
+        return jsonify({"success": False, "error": "Missing image"}), 400
 
-@app.route('/add-face', methods=['POST'])
-def add_face_route():
-	data = request.get_json()
-	image_data = data['image']
-	name = data['name']
-	header, encoded = image_data.split(',', 1)
-	img_bytes = base64.b64decode(encoded)
-	nparr = np.frombuffer(img_bytes, np.uint8)
-	img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-	# Assign a new ID for the user (max existing + 1)
-	user_dir = "dataset/user"
-	existing_ids = []
-	for img_file in os.listdir(user_dir):
-		try:
-			existing_ids.append(int(img_file.split('.')[1]))
-		except:
-			pass
-	new_id = max(existing_ids) + 1 if existing_ids else 1
-	add_face_image(img_np, name, new_id)
-	train_face_recognizer()
-	return jsonify({'success': True})
+    try:
+        if ',' in image_data:
+            _, encoded = image_data.split(',', 1)
+        else:
+            encoded = image_data
+        img_bytes = base64.b64decode(encoded)
+        nparr = np.frombuffer(img_bytes, np.uint8)
+        img_np = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        if img_np is None:
+            raise ValueError("Failed to decode image")
+    except Exception as e:
+        print(f"Error decoding image: {e}")
+        return jsonify({"success": False, "error": "Invalid image"}), 400
 
-if __name__ == '__main__':
-	app.run(host='0.0.0.0', port=5000)
+    try:
+        name = recognize_face(img_np)
+        return jsonify({"success": True, "name": name})
+    except Exception as e:
+        print(f"Error recognizing face: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
